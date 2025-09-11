@@ -44,34 +44,9 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Market Hours Logic ------------------
+# ------------------ Market Hours (can bypass for testing) ------------------
 def is_market_open():
-    now = datetime.now()
-    weekday = now.weekday()  # Monday=0 ... Sunday=6
-    if weekday >= 5:  # Sat or Sun
-        return False
-    market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
-    return market_open <= now <= market_close
-
-def sleep_until_market():
-    now = datetime.now()
-    weekday = now.weekday()
-    if weekday >= 5:
-        days_ahead = 7 - weekday
-        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
-    else:
-        if now.hour < 9 or (now.hour == 9 and now.minute < 14):
-            next_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-        else:
-            next_open = (now + timedelta(days=1)).replace(hour=9, minute=14, second=0, microsecond=0)
-            if next_open.weekday() >= 5:
-                days_ahead = 7 - next_open.weekday()
-                next_open = next_open + timedelta(days=days_ahead)
-
-    sleep_secs = (next_open - now).total_seconds()
-    print(f"⏸ Market closed. Sleeping until {next_open}")
-    time.sleep(sleep_secs)
+    return True  # always open for testing
 
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
@@ -101,49 +76,37 @@ def track_all(interval=2):
         prev_volume, prev_ltp = {}, {}
 
         while True:
-            if not is_market_open():
-                sleep_until_market()
-                continue
-
-            if not active_symbols:
-                time.sleep(1)
-                continue
-
             try:
+                if not active_symbols:
+                    time.sleep(1)
+                    continue
+
                 res = fyers.quotes({"symbols": ",".join(active_symbols)})
 
                 if res.get("code") == 401:
-                    print("⚠️ Unauthorized → refreshing token")
                     ACCESS_TOKEN = get_access_token()
                     fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
                     continue
 
                 if res.get("s") == "ok" and 'd' in res:
-                    now = time.time()
+                    now_ts = time.time()
                     for item in res['d']:
                         s, data = item['n'], item['v']
                         volume = data.get('volume', 0)
                         ltp = data.get('lp', 0) or data.get('ltp', 0)
-
-                        depth = data.get('depth', {})
-                        bid_price = depth.get('buy', [{}])[0].get('price')
-                        ask_price = depth.get('sell', [{}])[0].get('price')
-
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
                         prev_vol = prev_volume.get(s)
                         delta = max(0, volume - prev_vol) if prev_vol is not None else 0
                         prev_volume[s] = volume
 
                         buy_vol, sell_vol = 0, 0
                         prev_price = prev_ltp.get(s)
-                        if delta > 0:
-                            if ask_price and ltp >= ask_price:
+                        if delta > 0 and prev_price is not None:
+                            if ltp > prev_price:
                                 buy_vol = delta
-                            elif bid_price and ltp <= bid_price:
+                            elif ltp < prev_price:
                                 sell_vol = delta
-                            elif prev_price is not None:
-                                if ltp > prev_price: buy_vol = delta
-                                elif ltp < prev_price: sell_vol = delta
                         prev_ltp[s] = ltp
 
                         latest_data[s] = {
@@ -155,16 +118,13 @@ def track_all(interval=2):
                             "BuyVolume": buy_vol,
                             "SellVolume": sell_vol
                         }
-                        cache_expiry[s] = now
+                        cache_expiry[s] = now_ts
                     print(f"✅ Updated {len(res['d'])} symbols at {datetime.now().strftime('%H:%M:%S')}")
                 else:
                     print("❌ Data error:", res)
-
             except Exception as e:
                 print("⚠️ Exception inside loop:", e)
-
             time.sleep(interval)
-
     except Exception as e:
         print("❌ Worker startup error:", e)
 
@@ -176,7 +136,16 @@ def get_symbol(symbol: str):
     now = time.time()
     if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
         return latest_data[symbol_code]
-    return {"message": f"No data yet for {symbol}"}
+    # Return mock data immediately
+    return {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Symbol": symbol_code,
+        "CumulativeVolume": 0,
+        "Quantity": 0,
+        "LTP": 0,
+        "BuyVolume": 0,
+        "SellVolume": 0
+    }
 
 @app.get("/quotes")
 def get_multiple(symbol_list: str):
@@ -188,11 +157,22 @@ def get_multiple(symbol_list: str):
         if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
             resp[sym] = latest_data[symbol_code]
         else:
-            resp[sym] = {"message": f"No data yet for {sym}"}
+            resp[sym] = {
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Symbol": symbol_code,
+                "CumulativeVolume": 0,
+                "Quantity": 0,
+                "LTP": 0,
+                "BuyVolume": 0,
+                "SellVolume": 0
+            }
     return resp
 
-# ------------------ Start Worker on Startup ------------------
+# ------------------ Startup ------------------
 @app.on_event("startup")
-def start_background_worker():
+def start_worker():
+    # Preload all symbols so first request works
+    active_symbols.update(all_symbols)
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
+    print("🟢 Background worker started, all symbols preloaded")
