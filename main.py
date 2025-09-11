@@ -2,7 +2,7 @@ import requests
 import hashlib
 import time
 from fyers_apiv3 import fyersModel
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
@@ -44,10 +44,6 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Market Hours (can bypass for testing) ------------------
-def is_market_open():
-    return True  # always open for testing
-
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
@@ -75,6 +71,10 @@ def track_all(interval=2):
         fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
         prev_volume, prev_ltp = {}, {}
 
+        # Preload all symbols
+        for sym in all_symbols:
+            active_symbols.add(sym)
+
         while True:
             try:
                 if not active_symbols:
@@ -84,29 +84,37 @@ def track_all(interval=2):
                 res = fyers.quotes({"symbols": ",".join(active_symbols)})
 
                 if res.get("code") == 401:
+                    print("⚠️ Unauthorized → refreshing token")
                     ACCESS_TOKEN = get_access_token()
                     fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
                     continue
 
                 if res.get("s") == "ok" and 'd' in res:
-                    now_ts = time.time()
+                    now = time.time()
                     for item in res['d']:
                         s, data = item['n'], item['v']
                         volume = data.get('volume', 0)
                         ltp = data.get('lp', 0) or data.get('ltp', 0)
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+                        depth = data.get('depth', {})
+                        bid_price = depth.get('buy', [{}])[0].get('price')
+                        ask_price = depth.get('sell', [{}])[0].get('price')
+
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         prev_vol = prev_volume.get(s)
                         delta = max(0, volume - prev_vol) if prev_vol is not None else 0
                         prev_volume[s] = volume
 
                         buy_vol, sell_vol = 0, 0
                         prev_price = prev_ltp.get(s)
-                        if delta > 0 and prev_price is not None:
-                            if ltp > prev_price:
+                        if delta > 0:
+                            if ask_price and ltp >= ask_price:
                                 buy_vol = delta
-                            elif ltp < prev_price:
+                            elif bid_price and ltp <= bid_price:
                                 sell_vol = delta
+                            elif prev_price is not None:
+                                if ltp > prev_price: buy_vol = delta
+                                elif ltp < prev_price: sell_vol = delta
                         prev_ltp[s] = ltp
 
                         latest_data[s] = {
@@ -118,13 +126,17 @@ def track_all(interval=2):
                             "BuyVolume": buy_vol,
                             "SellVolume": sell_vol
                         }
-                        cache_expiry[s] = now_ts
+                        cache_expiry[s] = now
+
                     print(f"✅ Updated {len(res['d'])} symbols at {datetime.now().strftime('%H:%M:%S')}")
                 else:
                     print("❌ Data error:", res)
+
             except Exception as e:
                 print("⚠️ Exception inside loop:", e)
+
             time.sleep(interval)
+
     except Exception as e:
         print("❌ Worker startup error:", e)
 
@@ -136,21 +148,12 @@ def get_symbol(symbol: str):
     now = time.time()
     if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
         return latest_data[symbol_code]
-    # Return mock data immediately
-    return {
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Symbol": symbol_code,
-        "CumulativeVolume": 0,
-        "Quantity": 0,
-        "LTP": 0,
-        "BuyVolume": 0,
-        "SellVolume": 0
-    }
+    return {"message": f"No data yet for {symbol}"}
 
 @app.get("/quotes")
-def get_multiple(symbol_list: str):
-    symbols_req = symbol_list.split(",")
+def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
+    symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ","") for s in all_symbols]
     for sym in symbols_req:
         symbol_code = f"NSE:{sym}-EQ"
         active_symbols.add(symbol_code)
@@ -159,7 +162,7 @@ def get_multiple(symbol_list: str):
         else:
             resp[sym] = {
                 "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Symbol": symbol_code,
+                "Symbol": sym,
                 "CumulativeVolume": 0,
                 "Quantity": 0,
                 "LTP": 0,
@@ -168,11 +171,8 @@ def get_multiple(symbol_list: str):
             }
     return resp
 
-# ------------------ Startup ------------------
+# ------------------ Start Worker on Startup ------------------
 @app.on_event("startup")
-def start_worker():
-    # Preload all symbols so first request works
-    active_symbols.update(all_symbols)
+def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
-    print("🟢 Background worker started, all symbols preloaded")
