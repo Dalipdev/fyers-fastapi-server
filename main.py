@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
-import os 
+import os
 
 # ------------------ Credentials ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -47,8 +47,8 @@ all_symbols = [
 # ------------------ Market Hours Logic ------------------
 def is_market_open():
     now = datetime.now()
-    weekday = now.weekday()
-    if weekday >= 5:
+    weekday = now.weekday()  # Monday=0 ... Sunday=6
+    if weekday >= 5:  # Sat or Sun
         return False
     market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
@@ -68,6 +68,7 @@ def sleep_until_market():
             if next_open.weekday() >= 5:
                 days_ahead = 7 - next_open.weekday()
                 next_open = next_open + timedelta(days=days_ahead)
+
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
     time.sleep(sleep_secs)
@@ -104,11 +105,11 @@ def track_all(interval=2):
                 sleep_until_market()
                 continue
 
-            try:
-                if not active_symbols:
-                    time.sleep(1)
-                    continue
+            if not active_symbols:
+                time.sleep(1)
+                continue
 
+            try:
                 res = fyers.quotes({"symbols": ",".join(active_symbols)})
 
                 if res.get("code") == 401:
@@ -123,6 +124,7 @@ def track_all(interval=2):
                         s, data = item['n'], item['v']
                         volume = data.get('volume', 0)
                         ltp = data.get('lp', 0) or data.get('ltp', 0)
+
                         depth = data.get('depth', {})
                         bid_price = depth.get('buy', [{}])[0].get('price')
                         ask_price = depth.get('sell', [{}])[0].get('price')
@@ -189,12 +191,8 @@ def get_multiple(symbol_list: str):
             resp[sym] = {"message": f"No data yet for {sym}"}
     return resp
 
-# ------------------ Start Worker ------------------
-# 🔹 Add all symbols to active_symbols immediately
-active_symbols.update([f"NSE:{sym}-EQ" for sym in all_symbols])
-
-def start_worker():
+# ------------------ Start Worker on Startup ------------------
+@app.on_event("startup")
+def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
-
-start_worker()
