@@ -29,7 +29,7 @@ latest_data = {}
 cache_expiry = {}
 active_symbols = set()
 
-# ------------------ Stock List (Nifty + Bank Nifty) ------------------
+# ------------------ Stock List ------------------
 all_symbols = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ","NSE:BAJAJ-AUTO-EQ",
     "NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ","NSE:BEL-EQ","NSE:BHARTIARTL-EQ","NSE:CIPLA-EQ","NSE:COALINDIA-EQ",
@@ -47,8 +47,8 @@ all_symbols = [
 # ------------------ Market Hours Logic ------------------
 def is_market_open():
     now = datetime.now()
-    weekday = now.weekday()  # Monday=0 ... Sunday=6
-    if weekday >= 5:  # Sat or Sun
+    weekday = now.weekday()
+    if weekday >= 5:
         return False
     market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
@@ -57,7 +57,6 @@ def is_market_open():
 def sleep_until_market():
     now = datetime.now()
     weekday = now.weekday()
-    # weekend → sleep until Monday 9:14
     if weekday >= 5:
         days_ahead = 7 - weekday
         next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
@@ -69,7 +68,6 @@ def sleep_until_market():
             if next_open.weekday() >= 5:
                 days_ahead = 7 - next_open.weekday()
                 next_open = next_open + timedelta(days=days_ahead)
-
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
     time.sleep(sleep_secs)
@@ -113,7 +111,6 @@ def track_all(interval=2):
 
                 res = fyers.quotes({"symbols": ",".join(active_symbols)})
 
-                # 🛡️ Check for unauthorized
                 if res.get("code") == 401:
                     print("⚠️ Unauthorized → refreshing token")
                     ACCESS_TOKEN = get_access_token()
@@ -126,7 +123,6 @@ def track_all(interval=2):
                         s, data = item['n'], item['v']
                         volume = data.get('volume', 0)
                         ltp = data.get('lp', 0) or data.get('ltp', 0)
-
                         depth = data.get('depth', {})
                         bid_price = depth.get('buy', [{}])[0].get('price')
                         ask_price = depth.get('sell', [{}])[0].get('price')
@@ -194,6 +190,9 @@ def get_multiple(symbol_list: str):
     return resp
 
 # ------------------ Start Worker ------------------
+# 🔹 Add all symbols to active_symbols immediately
+active_symbols.update([f"NSE:{sym}-EQ" for sym in all_symbols])
+
 def start_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
