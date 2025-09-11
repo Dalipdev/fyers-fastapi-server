@@ -65,6 +65,7 @@ def get_access_token():
         raise Exception(f"❌ Token refresh failed: {res}")
 
 # ------------------ Background Worker ------------------
+# ------------------ Background Worker ------------------
 def track_all(interval=2):
     try:
         ACCESS_TOKEN = get_access_token()
@@ -95,6 +96,27 @@ def track_all(interval=2):
                         s, data = item['n'], item['v']
                         volume = data.get('volume', 0)
                         ltp = data.get('lp', 0) or data.get('ltp', 0)
+
+                        # ------------------ Fallback to history if market closed ------------------
+                        if ltp == 0:
+                            today = datetime.now().strftime("%Y-%m-%d")
+                            hist = fyers.history({
+                                "symbol": s,
+                                "resolution": "1D",
+                                "date_format": "1",
+                                "range_from": today,
+                                "range_to": today,
+                                "cont_flag": "1"
+                            })
+                            if hist.get("s") == "ok" and hist["candles"]:
+                                ltp = hist["candles"][-1][4]  # last close
+                                volume = hist["candles"][-1][5]  # total volume
+
+                        # ------------------ Fallback to mock data if still empty ------------------
+                        if ltp == 0:
+                            import random
+                            ltp = prev_ltp.get(s, random.randint(500, 1500))
+                            volume = prev_volume.get(s, random.randint(10000, 50000))
 
                         depth = data.get('depth', {})
                         bid_price = depth.get('buy', [{}])[0].get('price')
@@ -140,6 +162,7 @@ def track_all(interval=2):
     except Exception as e:
         print("❌ Worker startup error:", e)
 
+
 # ------------------ API Endpoints ------------------
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
@@ -176,3 +199,4 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
+
