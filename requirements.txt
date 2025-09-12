@@ -2,3 +2,4 @@ fastapi
 uvicorn
 requests
 fyers-apiv3
+python-dotenv
