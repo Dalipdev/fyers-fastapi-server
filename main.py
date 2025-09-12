@@ -56,30 +56,26 @@ def is_market_open():
     return market_open <= now <= market_close
 
 def wait_until_market_open():
-    """Block the thread until market is open (Mon-Fri 9:14)."""
-    while True:
-        now = datetime.now()
-        weekday = now.weekday()
-        if weekday >= 5:  # Sat/Sun → wait till next Monday
-            days_ahead = 7 - weekday
-            next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
+    now = datetime.now()
+    weekday = now.weekday()
+    if weekday >= 5:  # Sat/Sun → next Monday
+        days_ahead = 7 - weekday
+        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
+    else:
+        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
+        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
+        if now < market_open_today:
+            next_open = market_open_today
+        elif now > market_close_today:
+            next_day = now + timedelta(days=1)
+            while next_day.weekday() >= 5:
+                next_day += timedelta(days=1)
+            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
         else:
-            market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-            market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
-            if now < market_open:
-                next_open = market_open
-            elif now > market_close:
-                # after market → next day
-                next_day = now + timedelta(days=1)
-                while next_day.weekday() >= 5:
-                    next_day += timedelta(days=1)
-                next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
-            else:
-                # market is open
-                return
-        sleep_seconds = (next_open - now).total_seconds()
-        print(f"⏸ Market closed. Sleeping until {next_open}")
-        time.sleep(sleep_seconds)
+            return  # market is already open
+    sleep_secs = (next_open - now).total_seconds()
+    print(f"⏸ Market closed. Sleeping until {next_open}")
+    time.sleep(sleep_secs)
 
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
@@ -108,7 +104,14 @@ def track_all(interval=2):
     fyers = None
 
     while True:
-        wait_until_market_open()  # BLOCK until market is open
+        # --- BLOCK UNTIL MARKET IS OPEN ---
+        wait_until_market_open()
+
+        if not is_market_open():
+            fyers = None
+            ACCESS_TOKEN = None
+            continue
+
         try:
             if not fyers:
                 try:
@@ -122,9 +125,10 @@ def track_all(interval=2):
 
             symbols_to_track = active_symbols or set(all_symbols)
 
+            # Fetch quotes
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
 
-            if res and res.get("code") == 401:  # Unauthorized
+            if res and res.get("code") == 401:
                 ACCESS_TOKEN = get_access_token()
                 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
                 continue
@@ -159,7 +163,14 @@ def track_all(interval=2):
         except Exception as e:
             print("⚠️ Exception inside worker:", e)
 
-        time.sleep(interval)
+        # --- Sleep in 1-second chunks to detect market close ---
+        for _ in range(interval):
+            time.sleep(1)
+            if not is_market_open():
+                print("⏸ Market closed during interval, sleeping until next open...")
+                fyers = None
+                ACCESS_TOKEN = None
+                break
 
 # ------------------ API Endpoints ------------------
 @app.get("/quotes/{symbol}")
