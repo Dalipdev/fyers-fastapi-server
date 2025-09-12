@@ -106,18 +106,32 @@ def track_all(interval=2):
     while True:
         # --- ENFORCE MARKET HOURS ---
         if not is_market_open():
-            sleep_until_market()
             fyers = None
             ACCESS_TOKEN = None
-            continue  # restart loop after waking up
+            sleep_until_market()
+            continue
 
         try:
             # Initialize Fyers client only when market is open
             if not fyers:
-                ACCESS_TOKEN = get_access_token()
-                fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+                try:
+                    ACCESS_TOKEN = get_access_token()
+                    fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+                except Exception as e:
+                    print("⚠️ Token fetch failed → dummy mode:", e)
+                    fyers = None
+                    time.sleep(10)
+                    continue
 
             symbols_to_track = active_symbols or set(all_symbols)
+
+            # --- Only update if market is still open ---
+            if not is_market_open():
+                print("⏸ Market closed during update, skipping this iteration...")
+                sleep_until_market()
+                fyers = None
+                ACCESS_TOKEN = None
+                continue
 
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
 
