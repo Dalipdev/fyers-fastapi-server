@@ -48,7 +48,7 @@ all_symbols = [
 # ------------------ Market Hours Logic ------------------
 def is_market_open():
     now = datetime.now()
-    weekday = now.weekday()  # Mon=0, Sun=6
+    weekday = now.weekday()  # Mon=0 ... Sun=6
     if weekday >= 5:  # Sat/Sun
         return False
     market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
@@ -58,14 +58,12 @@ def is_market_open():
 def sleep_until_market():
     now = datetime.now()
     weekday = now.weekday()
-
     if weekday >= 5:  # Sat/Sun → next Monday
         days_ahead = 7 - weekday
         next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
     else:
         market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
         market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
-
         if now < market_open_today:  # before market
             next_open = market_open_today
         elif now > market_close_today:  # after market → next valid weekday
@@ -75,7 +73,6 @@ def sleep_until_market():
             next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
         else:  # market is open → no sleep
             return
-
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
     time.sleep(sleep_secs)
@@ -107,11 +104,13 @@ def track_all(interval=2):
     fyers = None
 
     while True:
+        # ---------------- Market Check ----------------
         if not is_market_open():
             sleep_until_market()
             continue
 
         try:
+            # Initialize Fyers client
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -125,6 +124,12 @@ def track_all(interval=2):
             symbols_to_track = active_symbols or set(all_symbols)
             if not symbols_to_track:
                 time.sleep(1)
+                continue
+
+            # ---------------- Check again mid-loop ----------------
+            if not is_market_open():
+                print("⏸ Market closed during update, sleeping...")
+                sleep_until_market()
                 continue
 
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
