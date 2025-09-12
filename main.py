@@ -107,10 +107,12 @@ def track_all(interval=2):
         # ---------------- Market Check ----------------
         if not is_market_open():
             sleep_until_market()
+            fyers = None   # release API client
+            ACCESS_TOKEN = None
             continue
 
         try:
-            # Initialize Fyers client
+            # Initialize Fyers client only when market is open
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -126,10 +128,12 @@ def track_all(interval=2):
                 time.sleep(1)
                 continue
 
-            # ---------------- Check again mid-loop ----------------
+            # Check again mid-loop in case market closes during processing
             if not is_market_open():
                 print("⏸ Market closed during update, sleeping...")
                 sleep_until_market()
+                fyers = None
+                ACCESS_TOKEN = None
                 continue
 
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
