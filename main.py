@@ -1,20 +1,33 @@
+import os
 import requests
 import hashlib
 import time
+from dotenv import load_dotenv
 from fyers_apiv3 import fyersModel
 from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import random
-import os 
-import uvicorn
 
-# ------------------ Credentials ------------------
+# ------------------ Load Environment ------------------
+load_dotenv()
+
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 PIN = os.getenv("PIN")
+
+# ------------------ Debugging Section ------------------
+print("🔍 Debugging environment vars:")
+print("CLIENT_ID:", CLIENT_ID if CLIENT_ID else "MISSING")
+print("SECRET_KEY length:", len(SECRET_KEY) if SECRET_KEY else "MISSING")
+print("REFRESH_TOKEN length:", len(REFRESH_TOKEN) if REFRESH_TOKEN else "MISSING")
+print(
+    "REFRESH_TOKEN preview:",
+    (REFRESH_TOKEN[:10] + " ... " + REFRESH_TOKEN[-10:]) if REFRESH_TOKEN else "MISSING"
+)
+print("PIN:", "SET" if PIN else "MISSING")
 
 # ------------------ FastAPI Setup ------------------
 app = FastAPI()
@@ -69,8 +82,6 @@ def get_access_token():
 # ------------------ Optimized Background Worker ------------------
 def track_all(interval=2):
     prev_volume, prev_ltp = {}, {}
-
-    # Add all symbols to active set once
     for sym in all_symbols:
         active_symbols.add(sym)
 
@@ -79,7 +90,6 @@ def track_all(interval=2):
 
     while True:
         try:
-            # Initialize Fyers connection if not ready
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -88,36 +98,28 @@ def track_all(interval=2):
                     print("⚠️ Token fetch failed, dummy mode:", e)
                     fyers = None
 
-            # Fetch all symbols in one call
             res = fyers.quotes({"symbols": ",".join(all_symbols)}) if fyers else None
             now = time.time()
 
             if res and res.get("s") == "ok" and 'd' in res:
-                data_map = {item['n']: item['v'] for item in res['d']}  # symbol → data map
-
+                data_map = {item['n']: item['v'] for item in res['d']}
                 for sym in all_symbols:
                     clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
                     data = data_map.get(sym, {})
-
                     ltp = data.get('lp', 0) or data.get('ltp', 0)
                     volume = data.get('volume', 0)
-
-                    # Fallback if live data missing
                     if not ltp or not volume:
                         ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
                         volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
-
                     prev_vol = prev_volume.get(clean_symbol)
                     delta = max(0, volume - prev_vol) if prev_vol is not None else 0
                     prev_volume[clean_symbol] = volume
-
                     prev_price = prev_ltp.get(clean_symbol)
                     buy_vol, sell_vol = 0, 0
                     if delta > 0 and prev_price is not None:
                         if ltp > prev_price: buy_vol = delta
                         elif ltp < prev_price: sell_vol = delta
                     prev_ltp[clean_symbol] = ltp
-
                     latest_data[clean_symbol] = {
                         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "Symbol": clean_symbol,
@@ -129,11 +131,8 @@ def track_all(interval=2):
                         "Mode": "live" if fyers else "dummy"
                     }
                     cache_expiry[clean_symbol] = now
-
                 print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
-
             else:
-                # Dummy update if API fails
                 for sym in all_symbols:
                     clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
                     ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
@@ -151,7 +150,6 @@ def track_all(interval=2):
                         "Mode": "dummy"
                     }
                     cache_expiry[clean_symbol] = now
-
         except Exception as e:
             print("⚠️ Exception inside loop:", e)
 
@@ -163,7 +161,6 @@ def force_fetch(symbol: str):
     now = time.time()
     ltp, volume = None, None
     mode = "live"
-
     try:
         sym_code = f"NSE:{clean_symbol}-EQ"
         ACCESS_TOKEN = get_access_token()
@@ -176,12 +173,10 @@ def force_fetch(symbol: str):
             volume = data.get("volume", 0)
     except Exception:
         ltp, volume, mode = None, None, "dummy"
-
     if not ltp or not volume:
         ltp = random.randint(500, 1500)
         volume = random.randint(10000, 50000)
         mode = "dummy"
-
     latest_data[clean_symbol] = {
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "Symbol": clean_symbol,
@@ -198,10 +193,7 @@ def force_fetch(symbol: str):
 # ------------------ API Endpoints ------------------
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "message": "API is running. Try /quotes or /quotes/RELIANCE"
-    }
+    return {"status": "ok", "message": "API is running. Try /quotes or /quotes/RELIANCE"}
 
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
@@ -214,7 +206,6 @@ def get_symbol(symbol: str):
 def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
     symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
-
     for sym in symbols_req:
         if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
             resp[sym] = latest_data[sym]
@@ -227,5 +218,3 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
-
-
