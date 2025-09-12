@@ -45,39 +45,45 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Market Hours Logic ------------------
+# ------------------ Market Hours ------------------
+MARKET_OPEN_HOUR = 9
+MARKET_OPEN_MINUTE = 14
+MARKET_CLOSE_HOUR = 15
+MARKET_CLOSE_MINUTE = 31
+
 def is_market_open():
     now = datetime.now()
-    weekday = now.weekday()  # Mon=0 ... Sun=6
-    if weekday >= 5:  # Sat/Sun
+    if now.weekday() >= 5:
         return False
-    market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
-    return market_open <= now <= market_close
+    open_time = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+    close_time = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+    return open_time <= now <= close_time
 
 def wait_until_market_open():
     now = datetime.now()
     weekday = now.weekday()
-    if weekday >= 5:  # Sat/Sun → next Monday
-        days_ahead = 7 - weekday
-        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
+    # Find next market open
+    if weekday >= 5:  # Saturday/Sunday
+        days_ahead = 7 - weekday  # next Monday
+        next_open = (now + timedelta(days=days_ahead)).replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
     else:
-        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
-        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
-        if now < market_open_today:
-            next_open = market_open_today
-        elif now > market_close_today:
+        open_time = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+        close_time = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+        if now < open_time:
+            next_open = open_time
+        elif now > close_time:
+            # Go to next weekday
             next_day = now + timedelta(days=1)
             while next_day.weekday() >= 5:
                 next_day += timedelta(days=1)
-            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
+            next_open = next_day.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
         else:
-            return  # market is already open
-    sleep_secs = (next_open - now).total_seconds()
-    print(f"⏸ Market closed. Sleeping until {next_open}")
-    time.sleep(sleep_secs)
+            return  # Already open
+    sleep_seconds = (next_open - now).total_seconds()
+    print(f"⏸ Market closed. Sleeping until next open: {next_open}")
+    time.sleep(sleep_seconds)
 
-# ------------------ Token Refresh ------------------
+# ------------------ Token ------------------
 def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
@@ -104,9 +110,8 @@ def track_all(interval=2):
     fyers = None
 
     while True:
-        # --- BLOCK UNTIL MARKET IS OPEN ---
+        # BLOCK UNTIL MARKET OPEN
         wait_until_market_open()
-
         if not is_market_open():
             fyers = None
             ACCESS_TOKEN = None
@@ -125,9 +130,7 @@ def track_all(interval=2):
 
             symbols_to_track = active_symbols or set(all_symbols)
 
-            # Fetch quotes
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
-
             if res and res.get("code") == 401:
                 ACCESS_TOKEN = get_access_token()
                 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
@@ -141,7 +144,6 @@ def track_all(interval=2):
                         if item['n'] == sym:
                             data = item['v']
                             break
-
                 ltp = data.get('lp', 0) or data.get('ltp', 0) or random.randint(500, 1500)
                 volume = data.get('volume', 0) or random.randint(10000, 50000)
                 delta = max(0, volume - prev_volume.get(sym, 0))
@@ -163,11 +165,11 @@ def track_all(interval=2):
         except Exception as e:
             print("⚠️ Exception inside worker:", e)
 
-        # --- Sleep in 1-second chunks to detect market close ---
+        # SLEEP FOR INTERVAL, BUT BREAK IF MARKET CLOSES
         for _ in range(interval):
             time.sleep(1)
             if not is_market_open():
-                print("⏸ Market closed during interval, sleeping until next open...")
+                print("⏸ Market closed during interval, waiting for next open...")
                 fyers = None
                 ACCESS_TOKEN = None
                 break
