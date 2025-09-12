@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
+import os
 
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -197,4 +198,5 @@ def start_worker():
     t.start()
 
 start_worker()
+
 
