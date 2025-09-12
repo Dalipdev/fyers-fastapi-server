@@ -7,7 +7,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import os
-import random
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -58,21 +57,24 @@ def is_market_open():
 def sleep_until_market():
     now = datetime.now()
     weekday = now.weekday()
+    
     if weekday >= 5:  # Sat/Sun → next Monday
         days_ahead = 7 - weekday
         next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
     else:
         market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
         market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
+        
         if now < market_open_today:  # before market
             next_open = market_open_today
         elif now > market_close_today:  # after market → next valid weekday
             next_day = now + timedelta(days=1)
-            while next_day.weekday() >= 5:  # skip weekends
+            while next_day.weekday() >= 5:
                 next_day += timedelta(days=1)
             next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
-        else:  # market is open → no sleep
-            return
+        else:
+            return  # market is open
+
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
     time.sleep(sleep_secs)
@@ -104,15 +106,13 @@ def track_all(interval=2):
     fyers = None
 
     while True:
-        # ---------------- Market Check ----------------
         if not is_market_open():
-            sleep_until_market()
-            fyers = None   # release API client
+            fyers = None
             ACCESS_TOKEN = None
+            sleep_until_market()
             continue
 
         try:
-            # Initialize Fyers client only when market is open
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -128,17 +128,14 @@ def track_all(interval=2):
                 time.sleep(1)
                 continue
 
-            # Check again mid-loop in case market closes during processing
             if not is_market_open():
-                print("⏸ Market closed during update, sleeping...")
-                sleep_until_market()
                 fyers = None
                 ACCESS_TOKEN = None
+                sleep_until_market()
                 continue
 
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
 
-            # Token expired → refresh
             if res and res.get("code") == 401:
                 print("⚠️ Unauthorized → refreshing token")
                 ACCESS_TOKEN = get_access_token()
@@ -154,9 +151,11 @@ def track_all(interval=2):
                             data = item['v']
                             break
 
-                # Fallback dummy data
-                ltp = data.get('lp', 0) or data.get('ltp', 0) or random.randint(500, 1500)
-                volume = data.get('volume', 0) or random.randint(10000, 50000)
+                ltp = data.get('lp', 0) or data.get('ltp', 0)
+                volume = data.get('volume', 0)
+                if ltp == 0 or volume == 0:
+                    continue  # skip if no live data
+
                 delta = max(0, volume - prev_volume.get(sym, 0))
                 prev_volume[sym] = volume
                 prev_ltp[sym] = ltp
@@ -167,7 +166,7 @@ def track_all(interval=2):
                     "CumulativeVolume": volume,
                     "Quantity": delta,
                     "LTP": ltp,
-                    "Mode": "live" if fyers else "dummy"
+                    "Mode": "live"
                 }
                 cache_expiry[sym] = now_time
 
