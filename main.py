@@ -55,27 +55,31 @@ def is_market_open():
     market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
     return market_open <= now <= market_close
 
-def sleep_until_market():
-    now = datetime.now()
-    weekday = now.weekday()
-    if weekday >= 5:  # Sat/Sun → next Monday
-        days_ahead = 7 - weekday
-        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
-    else:
-        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
-        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
-        if now < market_open_today:  # before market
-            next_open = market_open_today
-        elif now > market_close_today:  # after market → next valid weekday
-            next_day = now + timedelta(days=1)
-            while next_day.weekday() >= 5:  # skip weekends
-                next_day += timedelta(days=1)
-            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
-        else:  # market is open → no sleep
-            return
-    sleep_secs = (next_open - now).total_seconds()
-    print(f"⏸ Market closed. Sleeping until {next_open}")
-    time.sleep(sleep_secs)
+def wait_until_market_open():
+    """Block the thread until market is open (Mon-Fri 9:14)."""
+    while True:
+        now = datetime.now()
+        weekday = now.weekday()
+        if weekday >= 5:  # Sat/Sun → wait till next Monday
+            days_ahead = 7 - weekday
+            next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
+        else:
+            market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
+            market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
+            if now < market_open:
+                next_open = market_open
+            elif now > market_close:
+                # after market → next day
+                next_day = now + timedelta(days=1)
+                while next_day.weekday() >= 5:
+                    next_day += timedelta(days=1)
+                next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
+            else:
+                # market is open
+                return
+        sleep_seconds = (next_open - now).total_seconds()
+        print(f"⏸ Market closed. Sleeping until {next_open}")
+        time.sleep(sleep_seconds)
 
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
@@ -104,15 +108,8 @@ def track_all(interval=2):
     fyers = None
 
     while True:
-        # --- ENFORCE MARKET HOURS ---
-        if not is_market_open():
-            fyers = None
-            ACCESS_TOKEN = None
-            sleep_until_market()
-            continue
-
+        wait_until_market_open()  # BLOCK until market is open
         try:
-            # Initialize Fyers client only when market is open
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -125,18 +122,9 @@ def track_all(interval=2):
 
             symbols_to_track = active_symbols or set(all_symbols)
 
-            # --- Only update if market is still open ---
-            if not is_market_open():
-                print("⏸ Market closed during update, skipping this iteration...")
-                sleep_until_market()
-                fyers = None
-                ACCESS_TOKEN = None
-                continue
-
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
 
-            # Token expired → refresh
-            if res and res.get("code") == 401:
+            if res and res.get("code") == 401:  # Unauthorized
                 ACCESS_TOKEN = get_access_token()
                 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
                 continue
@@ -150,7 +138,6 @@ def track_all(interval=2):
                             data = item['v']
                             break
 
-                # Fallback dummy data
                 ltp = data.get('lp', 0) or data.get('ltp', 0) or random.randint(500, 1500)
                 volume = data.get('volume', 0) or random.randint(10000, 50000)
                 delta = max(0, volume - prev_volume.get(sym, 0))
