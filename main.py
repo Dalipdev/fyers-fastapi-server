@@ -46,42 +46,36 @@ all_symbols = [
 ]
 
 # ------------------ Market Hours Logic ------------------
-MARKET_OPEN_HOUR = 9
-MARKET_OPEN_MINUTE = 14
-MARKET_CLOSE_HOUR = 15
-MARKET_CLOSE_MINUTE = 31
-
 def is_market_open():
     now = datetime.now()
     weekday = now.weekday()  # Mon=0 ... Sun=6
-    if weekday >= 5:  # Saturday/Sunday
+    if weekday >= 5:  # Sat/Sun
         return False
-    market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
-    market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
+    market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
     return market_open <= now <= market_close
 
 def sleep_until_market():
-    """Sleep until next market open (next weekday 9:14)"""
     now = datetime.now()
     weekday = now.weekday()
     if weekday >= 5:  # Sat/Sun → next Monday
         days_ahead = 7 - weekday
+        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
     else:
-        # Before market open today
-        market_open_today = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
-        if now < market_open_today:
-            days_ahead = 0
-        else:
-            # After market close → next weekday
-            days_ahead = 1
+        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
+        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
+        if now < market_open_today:  # before market
+            next_open = market_open_today
+        elif now > market_close_today:  # after market → next valid weekday
             next_day = now + timedelta(days=1)
             while next_day.weekday() >= 5:  # skip weekends
                 next_day += timedelta(days=1)
-                days_ahead += 1
-    next_open = (now + timedelta(days=days_ahead)).replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
+            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
+        else:  # market is open → no sleep
+            return
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
-    time.sleep(max(0, sleep_secs))
+    time.sleep(sleep_secs)
 
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
@@ -110,11 +104,12 @@ def track_all(interval=2):
     fyers = None
 
     while True:
-        # --- HARD WAIT UNTIL MARKET IS OPEN ---
-        while not is_market_open():
+        # --- ENFORCE MARKET HOURS ---
+        if not is_market_open():
             sleep_until_market()
             fyers = None
             ACCESS_TOKEN = None
+            continue  # restart loop after waking up
 
         try:
             # Initialize Fyers client only when market is open
@@ -123,20 +118,11 @@ def track_all(interval=2):
                 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
 
             symbols_to_track = active_symbols or set(all_symbols)
-            if not symbols_to_track:
-                time.sleep(1)
-                continue
-
-            # Mid-loop market close check
-            if not is_market_open():
-                print("⏸ Market closed during update. Returning to sleep...")
-                continue
 
             res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
 
             # Token expired → refresh
             if res and res.get("code") == 401:
-                print("⚠️ Unauthorized → refreshing token")
                 ACCESS_TOKEN = get_access_token()
                 fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
                 continue
