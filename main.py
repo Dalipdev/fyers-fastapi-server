@@ -1,3 +1,7 @@
+
+
+
+
 import requests
 import hashlib
 import time
@@ -6,6 +10,7 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
+import random
 import os
 
 # ------------------ Credentials ------------------
@@ -14,7 +19,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 PIN = os.getenv("PIN")
 
-# ------------------ FastAPI ------------------
+# ------------------ FastAPI Setup ------------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -24,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------ Shared data ------------------
+# ------------------ Shared Data ------------------
 latest_data = {}
 cache_expiry = {}
 active_symbols = set()
@@ -64,134 +69,153 @@ def get_access_token():
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
 
-# ------------------ Background Worker ------------------
-# ------------------ Background Worker ------------------
+# ------------------ Optimized Background Worker ------------------
 def track_all(interval=2):
-    try:
-        ACCESS_TOKEN = get_access_token()
-        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
-        prev_volume, prev_ltp = {}, {}
+    prev_volume, prev_ltp = {}, {}
 
-        # Preload all symbols
-        for sym in all_symbols:
-            active_symbols.add(sym)
+    # Add all symbols to active set once
+    for sym in all_symbols:
+        active_symbols.add(sym)
 
-        while True:
-            try:
-                if not active_symbols:
-                    time.sleep(1)
-                    continue
+    ACCESS_TOKEN = None
+    fyers = None
 
-                res = fyers.quotes({"symbols": ",".join(active_symbols)})
-
-                if res.get("code") == 401:
-                    print("⚠️ Unauthorized → refreshing token")
+    while True:
+        try:
+            # Initialize Fyers connection if not ready
+            if not fyers:
+                try:
                     ACCESS_TOKEN = get_access_token()
                     fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
-                    continue
+                except Exception as e:
+                    print("⚠️ Token fetch failed, dummy mode:", e)
+                    fyers = None
 
-                if res.get("s") == "ok" and 'd' in res:
-                    now = time.time()
-                    for item in res['d']:
-                        s, data = item['n'], item['v']
-                        volume = data.get('volume', 0)
-                        ltp = data.get('lp', 0) or data.get('ltp', 0)
+            # Fetch all symbols in one call
+            res = fyers.quotes({"symbols": ",".join(all_symbols)}) if fyers else None
+            now = time.time()
 
-                        # ------------------ Fallback to history if market closed ------------------
-                        if ltp == 0:
-                            today = datetime.now().strftime("%Y-%m-%d")
-                            hist = fyers.history({
-                                "symbol": s,
-                                "resolution": "1D",
-                                "date_format": "1",
-                                "range_from": today,
-                                "range_to": today,
-                                "cont_flag": "1"
-                            })
-                            if hist.get("s") == "ok" and hist["candles"]:
-                                ltp = hist["candles"][-1][4]  # last close
-                                volume = hist["candles"][-1][5]  # total volume
+            if res and res.get("s") == "ok" and 'd' in res:
+                data_map = {item['n']: item['v'] for item in res['d']}  # symbol → data map
 
-                        # ------------------ Fallback to mock data if still empty ------------------
-                        if ltp == 0:
-                            import random
-                            ltp = prev_ltp.get(s, random.randint(500, 1500))
-                            volume = prev_volume.get(s, random.randint(10000, 50000))
+                for sym in all_symbols:
+                    clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
+                    data = data_map.get(sym, {})
 
-                        depth = data.get('depth', {})
-                        bid_price = depth.get('buy', [{}])[0].get('price')
-                        ask_price = depth.get('sell', [{}])[0].get('price')
+                    ltp = data.get('lp', 0) or data.get('ltp', 0)
+                    volume = data.get('volume', 0)
 
-                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        prev_vol = prev_volume.get(s)
-                        delta = max(0, volume - prev_vol) if prev_vol is not None else 0
-                        prev_volume[s] = volume
+                    # Fallback if live data missing
+                    if not ltp or not volume:
+                        ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
+                        volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
 
-                        buy_vol, sell_vol = 0, 0
-                        prev_price = prev_ltp.get(s)
-                        if delta > 0:
-                            if ask_price and ltp >= ask_price:
-                                buy_vol = delta
-                            elif bid_price and ltp <= bid_price:
-                                sell_vol = delta
-                            elif prev_price is not None:
-                                if ltp > prev_price: buy_vol = delta
-                                elif ltp < prev_price: sell_vol = delta
-                        prev_ltp[s] = ltp
+                    prev_vol = prev_volume.get(clean_symbol)
+                    delta = max(0, volume - prev_vol) if prev_vol is not None else 0
+                    prev_volume[clean_symbol] = volume
 
-                        latest_data[s] = {
-                            "Timestamp": timestamp,
-                            "Symbol": s,
-                            "CumulativeVolume": volume,
-                            "Quantity": delta,
-                            "LTP": ltp,
-                            "BuyVolume": buy_vol,
-                            "SellVolume": sell_vol
-                        }
-                        cache_expiry[s] = now
+                    prev_price = prev_ltp.get(clean_symbol)
+                    buy_vol, sell_vol = 0, 0
+                    if delta > 0 and prev_price is not None:
+                        if ltp > prev_price: buy_vol = delta
+                        elif ltp < prev_price: sell_vol = delta
+                    prev_ltp[clean_symbol] = ltp
 
-                    print(f"✅ Updated {len(res['d'])} symbols at {datetime.now().strftime('%H:%M:%S')}")
-                else:
-                    print("❌ Data error:", res)
+                    latest_data[clean_symbol] = {
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Symbol": clean_symbol,
+                        "CumulativeVolume": volume,
+                        "Quantity": delta,
+                        "LTP": ltp,
+                        "BuyVolume": buy_vol,
+                        "SellVolume": sell_vol,
+                        "Mode": "live" if fyers else "dummy"
+                    }
+                    cache_expiry[clean_symbol] = now
 
-            except Exception as e:
-                print("⚠️ Exception inside loop:", e)
+                print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
 
-            time.sleep(interval)
+            else:
+                # Dummy update if API fails
+                for sym in all_symbols:
+                    clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
+                    ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
+                    volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
+                    prev_ltp[clean_symbol] = ltp
+                    prev_volume[clean_symbol] = volume
+                    latest_data[clean_symbol] = {
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Symbol": clean_symbol,
+                        "CumulativeVolume": volume,
+                        "Quantity": 0,
+                        "LTP": ltp,
+                        "BuyVolume": 0,
+                        "SellVolume": 0,
+                        "Mode": "dummy"
+                    }
+                    cache_expiry[clean_symbol] = now
 
-    except Exception as e:
-        print("❌ Worker startup error:", e)
+        except Exception as e:
+            print("⚠️ Exception inside loop:", e)
 
+        time.sleep(interval)
+
+# ------------------ Force Fetch ------------------
+def force_fetch(symbol: str):
+    clean_symbol = symbol.upper()
+    now = time.time()
+    ltp, volume = None, None
+    mode = "live"
+
+    try:
+        sym_code = f"NSE:{clean_symbol}-EQ"
+        ACCESS_TOKEN = get_access_token()
+        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+        res = fyers.quotes({"symbols": sym_code})
+        if res.get("s") == "ok" and "d" in res:
+            item = res["d"][0]
+            data = item["v"]
+            ltp = data.get("lp", 0) or data.get("ltp", 0)
+            volume = data.get("volume", 0)
+    except Exception:
+        ltp, volume, mode = None, None, "dummy"
+
+    if not ltp or not volume:
+        ltp = random.randint(500, 1500)
+        volume = random.randint(10000, 50000)
+        mode = "dummy"
+
+    latest_data[clean_symbol] = {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Symbol": clean_symbol,
+        "CumulativeVolume": volume,
+        "Quantity": 0,
+        "LTP": ltp,
+        "BuyVolume": 0,
+        "SellVolume": 0,
+        "Mode": mode
+    }
+    cache_expiry[clean_symbol] = now
+    return latest_data[clean_symbol]
 
 # ------------------ API Endpoints ------------------
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
-    symbol_code = f"NSE:{symbol}-EQ"
-    active_symbols.add(symbol_code)
     now = time.time()
-    if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
-        return latest_data[symbol_code]
-    return {"message": f"No data yet for {symbol}"}
+    if symbol in latest_data and (now - cache_expiry.get(symbol, 0)) < 5:
+        return latest_data[symbol]
+    return force_fetch(symbol)
 
 @app.get("/quotes")
 def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
-    symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ","") for s in all_symbols]
+    symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
+
     for sym in symbols_req:
-        symbol_code = f"NSE:{sym}-EQ"
-        active_symbols.add(symbol_code)
-        if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
-            resp[sym] = latest_data[symbol_code]
+        if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
+            resp[sym] = latest_data[sym]
         else:
-            resp[sym] = {
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "Symbol": sym,
-                "CumulativeVolume": 0,
-                "Quantity": 0,
-                "LTP": 0,
-                "BuyVolume": 0,
-                "SellVolume": 0
-            }
+            resp[sym] = force_fetch(sym)
     return resp
 
 # ------------------ Start Worker on Startup ------------------
