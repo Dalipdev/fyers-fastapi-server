@@ -49,7 +49,7 @@ all_symbols = [
 def is_market_open():
     now = datetime.now()
     weekday = now.weekday()  # Mon=0, Sun=6
-    if weekday >= 5:
+    if weekday >= 5:  # Sat/Sun
         return False
     market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
@@ -58,17 +58,23 @@ def is_market_open():
 def sleep_until_market():
     now = datetime.now()
     weekday = now.weekday()
+
     if weekday >= 5:  # Sat/Sun → next Monday
         days_ahead = 7 - weekday
         next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
     else:
-        if now.hour < 9 or (now.hour == 9 and now.minute < 14):
-            next_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-        else:
-            next_open = (now + timedelta(days=1)).replace(hour=9, minute=14, second=0, microsecond=0)
-            if next_open.weekday() >= 5:
-                days_ahead = 7 - next_open.weekday()
-                next_open = next_open + timedelta(days=days_ahead)
+        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
+        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
+
+        if now < market_open_today:  # before market
+            next_open = market_open_today
+        elif now > market_close_today:  # after market → next valid weekday
+            next_day = now + timedelta(days=1)
+            while next_day.weekday() >= 5:  # skip weekends
+                next_day += timedelta(days=1)
+            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
+        else:  # market is open → no sleep
+            return
 
     sleep_secs = (next_open - now).total_seconds()
     print(f"⏸ Market closed. Sleeping until {next_open}")
@@ -138,6 +144,7 @@ def track_all(interval=2):
                         if item['n'] == sym:
                             data = item['v']
                             break
+
                 # Fallback dummy data
                 ltp = data.get('lp', 0) or data.get('ltp', 0) or random.randint(500, 1500)
                 volume = data.get('volume', 0) or random.randint(10000, 50000)
