@@ -3,4 +3,6 @@ uvicorn
 requests
 fyers-apiv3
 pytz
+threading
+
 
