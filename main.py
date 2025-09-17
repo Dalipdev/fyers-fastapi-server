@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import os
+from pytz import timezone
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -45,7 +46,7 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Token Refresh ------------------
+# ------------------ Fyers Token ------------------
 def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
@@ -65,14 +66,35 @@ def get_access_token():
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
 
+# ------------------ Initialize Previous Values ------------------
+def initialize_prev_values():
+    try:
+        ACCESS_TOKEN = get_access_token()
+        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+        res = fyers.quotes({"symbols": ",".join(all_symbols)})
+        if res.get("s") == "ok" and 'd' in res:
+            for item in res['d']:
+                sym = item['n'].replace("NSE:", "").replace("-EQ", "")
+                data = item['v']
+                prev_volume[sym] = data.get('volume', 0)
+                prev_ltp[sym] = data.get('lp', 0) or data.get('ltp', 0)
+    except Exception as e:
+        print("⚠️ Failed to initialize previous values:", e)
+
 # ------------------ Background Worker ------------------
 def track_all(interval=300):
     ACCESS_TOKEN = None
     fyers = None
+    ist = timezone('Asia/Kolkata')
 
     while True:
+        now = datetime.now(ist)
+        # Skip outside market hours
+        if now.hour < 9 or (now.hour == 9 and now.minute < 14) or now.hour > 15 or (now.hour == 15 and now.minute > 31):
+            time.sleep(60)
+            continue
+
         try:
-            # Initialize Fyers connection if not ready
             if not fyers:
                 try:
                     ACCESS_TOKEN = get_access_token()
@@ -81,7 +103,6 @@ def track_all(interval=300):
                     print("⚠️ Token fetch failed:", e)
                     fyers = None
 
-            # Fetch all symbols in one call
             res = fyers.quotes({"symbols": ",".join(all_symbols)}) if fyers else None
             now_ts = time.time()
 
@@ -95,10 +116,8 @@ def track_all(interval=300):
                     ltp = data.get('lp', 0) or data.get('ltp', 0)
                     volume = data.get('volume', 0)
 
-                    # Initialize prev values if first tick
                     prev_v = prev_volume.get(clean_symbol, volume)
                     prev_p = prev_ltp.get(clean_symbol, ltp)
-
                     delta_qty = volume - prev_v
 
                     buy_vol, sell_vol = 0, 0
@@ -108,7 +127,6 @@ def track_all(interval=300):
                         elif ltp < prev_p:
                             sell_vol = delta_qty
 
-                    # Update previous values
                     prev_volume[clean_symbol] = volume
                     prev_ltp[clean_symbol] = ltp
 
@@ -183,6 +201,10 @@ def force_fetch(symbol: str):
 def root():
     return {"status": "ok", "message": "API running. Try /quotes or /quotes/RELIANCE"}
 
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}  # For UptimeRobot
+
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
     now = time.time()
@@ -205,5 +227,6 @@ def get_multiple(symbol_list: str = ""):
 # ------------------ Start Worker ------------------
 @app.on_event("startup")
 def start_worker():
+    initialize_prev_values()
     t = threading.Thread(target=track_all, args=(300,), daemon=True)  # 5 min interval
     t.start()
