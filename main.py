@@ -2,11 +2,10 @@ import requests
 import hashlib
 import time
 from fyers_apiv3 import fyersModel
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
-import os
 import random
 
 # ------------------ Environment Variables ------------------
@@ -45,37 +44,14 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Market Hours Logic ------------------
+# ------------------ Trading Window Check ------------------
 def is_market_open():
     now = datetime.now()
-    weekday = now.weekday()  # Mon=0 ... Sun=6
-    if weekday >= 5:  # Sat/Sun
-        return False
-    market_open = now.replace(hour=9, minute=14, second=0, microsecond=0)
-    market_close = now.replace(hour=15, minute=31, second=0, microsecond=0)
-    return market_open <= now <= market_close
-
-def sleep_until_market():
-    now = datetime.now()
-    weekday = now.weekday()
-    if weekday >= 5:  # Sat/Sun → next Monday
-        days_ahead = 7 - weekday
-        next_open = (now + timedelta(days=days_ahead)).replace(hour=9, minute=14, second=0, microsecond=0)
-    else:
-        market_open_today = now.replace(hour=9, minute=14, second=0, microsecond=0)
-        market_close_today = now.replace(hour=15, minute=31, second=0, microsecond=0)
-        if now < market_open_today:  # before market
-            next_open = market_open_today
-        elif now > market_close_today:  # after market → next valid weekday
-            next_day = now + timedelta(days=1)
-            while next_day.weekday() >= 5:  # skip weekends
-                next_day += timedelta(days=1)
-            next_open = next_day.replace(hour=9, minute=14, second=0, microsecond=0)
-        else:  # market is open → no sleep
-            return
-    sleep_secs = (next_open - now).total_seconds()
-    print(f"⏸ Market closed. Sleeping until {next_open}")
-    time.sleep(sleep_secs)
+    return (
+        now.weekday() < 5 and   # Mon–Fri
+        (now.hour > 9 or (now.hour == 9 and now.minute >= 14)) and
+        (now.hour < 15 or (now.hour == 15 and now.minute <= 31))
+    )
 
 # ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
@@ -97,111 +73,162 @@ def get_access_token():
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
 
-# ------------------ Worker ------------------
+# ------------------ Optimized Background Worker ------------------
 def track_all(interval=2):
     prev_volume, prev_ltp = {}, {}
+
+    # Add all symbols to active set once
+    for sym in all_symbols:
+        active_symbols.add(sym)
+
     ACCESS_TOKEN = None
     fyers = None
 
     while True:
-        # ---------------- Market Check ----------------
-        if not is_market_open():
-            sleep_until_market()
-            continue
-
         try:
-            # Initialize Fyers client
-            if not fyers:
-                try:
-                    ACCESS_TOKEN = get_access_token()
-                    fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
-                except Exception as e:
-                    print("⚠️ Token fetch failed → dummy mode:", e)
-                    fyers = None
-                    time.sleep(10)
-                    continue
+            now = datetime.now()
 
-            symbols_to_track = active_symbols or set(all_symbols)
-            if not symbols_to_track:
-                time.sleep(1)
-                continue
+            if is_market_open():
+                # Inside trading window
+                if not fyers:
+                    try:
+                        ACCESS_TOKEN = get_access_token()
+                        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+                    except Exception as e:
+                        print("⚠️ Token fetch failed, dummy mode:", e)
+                        fyers = None
 
-            # ---------------- Check again mid-loop ----------------
-            if not is_market_open():
-                print("⏸ Market closed during update, sleeping...")
-                sleep_until_market()
-                continue
+                res = fyers.quotes({"symbols": ",".join(all_symbols)}) if fyers else None
+                now_ts = time.time()
 
-            res = fyers.quotes({"symbols": ",".join(symbols_to_track)}) if fyers else None
-
-            # Token expired → refresh
-            if res and res.get("code") == 401:
-                print("⚠️ Unauthorized → refreshing token")
-                ACCESS_TOKEN = get_access_token()
-                fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
-                continue
-
-            now_time = time.time()
-            for sym in symbols_to_track:
-                data = {}
                 if res and res.get("s") == "ok" and 'd' in res:
-                    for item in res['d']:
-                        if item['n'] == sym:
-                            data = item['v']
-                            break
+                    data_map = {item['n']: item['v'] for item in res['d']}  # symbol → data map
 
-                # Fallback dummy data
-                ltp = data.get('lp', 0) or data.get('ltp', 0) or random.randint(500, 1500)
-                volume = data.get('volume', 0) or random.randint(10000, 50000)
-                delta = max(0, volume - prev_volume.get(sym, 0))
-                prev_volume[sym] = volume
-                prev_ltp[sym] = ltp
+                    for sym in all_symbols:
+                        clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
+                        data = data_map.get(sym, {})
 
-                latest_data[sym] = {
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Symbol": sym,
-                    "CumulativeVolume": volume,
-                    "Quantity": delta,
-                    "LTP": ltp,
-                    "Mode": "live" if fyers else "dummy"
-                }
-                cache_expiry[sym] = now_time
+                        ltp = data.get('lp', 0) or data.get('ltp', 0)
+                        volume = data.get('volume', 0)
 
-            print(f"✅ Updated {len(symbols_to_track)} symbols at {datetime.now().strftime('%H:%M:%S')}")
+                        if not ltp or not volume:
+                            ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
+                            volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
+
+                        prev_vol = prev_volume.get(clean_symbol)
+                        delta = max(0, volume - prev_vol) if prev_vol is not None else 0
+                        prev_volume[clean_symbol] = volume
+
+                        prev_price = prev_ltp.get(clean_symbol)
+                        buy_vol, sell_vol = 0, 0
+                        if delta > 0 and prev_price is not None:
+                            if ltp > prev_price: buy_vol = delta
+                            elif ltp < prev_price: sell_vol = delta
+                        prev_ltp[clean_symbol] = ltp
+
+                        latest_data[clean_symbol] = {
+                            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "Symbol": clean_symbol,
+                            "CumulativeVolume": volume,
+                            "Quantity": delta,
+                            "LTP": ltp,
+                            "BuyVolume": buy_vol,
+                            "SellVolume": sell_vol,
+                            "Mode": "live" if fyers else "dummy"
+                        }
+                        cache_expiry[clean_symbol] = now_ts
+
+                    print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
+
+                else:
+                    print("⚠️ API unavailable, skipping cycle")
+
+            else:
+                # Outside allowed time → sleep longer
+                print(f"⏸ Paused at {now.strftime('%H:%M:%S')} (outside trading window)")
+                time.sleep(60)
+                continue
 
         except Exception as e:
-            print("⚠️ Exception inside worker:", e)
+            print("⚠️ Exception inside loop:", e)
 
         time.sleep(interval)
 
+# ------------------ Force Fetch ------------------
+def force_fetch(symbol: str):
+    clean_symbol = symbol.upper()
+    now = time.time()
+    ltp, volume = None, None
+    mode = "live"
+
+    try:
+        sym_code = f"NSE:{clean_symbol}-EQ"
+        ACCESS_TOKEN = get_access_token()
+        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+        res = fyers.quotes({"symbols": sym_code})
+        if res.get("s") == "ok" and "d" in res:
+            item = res["d"][0]
+            data = item["v"]
+            ltp = data.get("lp", 0) or data.get("ltp", 0)
+            volume = data.get("volume", 0)
+    except Exception:
+        ltp, volume, mode = None, None, "dummy"
+
+    if not ltp or not volume:
+        ltp = random.randint(500, 1500)
+        volume = random.randint(10000, 50000)
+        mode = "dummy"
+
+    latest_data[clean_symbol] = {
+        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Symbol": clean_symbol,
+        "CumulativeVolume": volume,
+        "Quantity": 0,
+        "LTP": ltp,
+        "BuyVolume": 0,
+        "SellVolume": 0,
+        "Mode": mode
+    }
+    cache_expiry[clean_symbol] = now
+    return latest_data[clean_symbol]
+
 # ------------------ API Endpoints ------------------
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "message": "API is running. Try /quotes or /quotes/RELIANCE"
+    }
+
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
-    symbol_code = f"NSE:{symbol}-EQ"
-    active_symbols.add(symbol_code)
+    if not is_market_open():
+        return {"status": "closed", "message": "Market closed. Data unavailable outside 09:14–15:31"}
+
     now = time.time()
-    if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
-        return latest_data[symbol_code]
-    return {"message": f"No data yet for {symbol}"}
+    if symbol in latest_data and (now - cache_expiry.get(symbol, 0)) < 5:
+        return latest_data[symbol]
+    return force_fetch(symbol)
 
 @app.get("/quotes")
 def get_multiple(symbol_list: str = ""):
-    symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "") for s in all_symbols]
+    if not is_market_open():
+        return {"status": "closed", "message": "Market closed. Data unavailable outside 09:14–15:31"}
+
     resp, now = {}, time.time()
+    symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
+
     for sym in symbols_req:
-        symbol_code = f"NSE:{sym}-EQ"
-        active_symbols.add(symbol_code)
-        if symbol_code in latest_data and (now - cache_expiry.get(symbol_code, 0)) < 5:
-            resp[sym] = latest_data[symbol_code]
+        if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
+            resp[sym] = latest_data[sym]
         else:
-            resp[sym] = {"message": f"No data yet for {sym}"}
+            resp[sym] = force_fetch(sym)
     return resp
 
-# ------------------ Start Background Worker ------------------
-def start_worker():
+# ------------------ Start Worker on Startup ------------------
+@app.on_event("startup")
+def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
 
-@app.on_event("startup")
-def on_startup():
-    start_worker()
+
