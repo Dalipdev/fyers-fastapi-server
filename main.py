@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import random
+import os
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -230,6 +231,7 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
+
 
 
 
