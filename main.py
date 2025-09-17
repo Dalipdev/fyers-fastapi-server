@@ -29,8 +29,7 @@ latest_data = {}
 cache_expiry = {}
 prev_ltp = {}
 prev_volume = {}
-
-lock = threading.Lock()  # 🔒 lock for thread safety
+lock = threading.Lock()
 
 # ------------------ Stock List ------------------
 all_symbols = [
@@ -124,6 +123,7 @@ def track_all(interval=300):
                             elif ltp < prev_p:
                                 sell_vol = delta_qty
 
+                        # update prev values always
                         prev_volume[clean_symbol] = volume
                         prev_ltp[clean_symbol] = ltp
 
@@ -149,7 +149,7 @@ def track_all(interval=300):
         time.sleep(interval)
 
 # ------------------ Force Fetch ------------------
-def force_fetch(symbol: str, update_prev=False):
+def force_fetch(symbol: str):
     clean_symbol = symbol.upper()
     ACCESS_TOKEN = get_access_token()
     fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
@@ -168,18 +168,16 @@ def force_fetch(symbol: str, update_prev=False):
             prev_v = prev_volume.get(clean_symbol, volume)
             prev_p = prev_ltp.get(clean_symbol, ltp)
 
-        delta_qty = max(volume - prev_v, 0)
-        if delta_qty > 0:
-            if ltp > prev_p:
-                buy_vol = delta_qty
-            elif ltp < prev_p:
-                sell_vol = delta_qty
+            delta_qty = max(volume - prev_v, 0)
+            if delta_qty > 0:
+                if ltp > prev_p:
+                    buy_vol = delta_qty
+                elif ltp < prev_p:
+                    sell_vol = delta_qty
 
-        # only update if asked
-        if update_prev:
-            with lock:
-                prev_volume[clean_symbol] = volume
-                prev_ltp[clean_symbol] = ltp
+            # always update prev values
+            prev_volume[clean_symbol] = volume
+            prev_ltp[clean_symbol] = ltp
 
     latest_data[clean_symbol] = {
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -199,27 +197,33 @@ def force_fetch(symbol: str, update_prev=False):
 def root():
     return {"status": "ok", "message": "API running. Try /quotes or /quotes/RELIANCE"}
 
+@app.get("/ping")
+def ping():
+    return {"status": "alive", "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
     now = time.time()
-    if symbol in latest_data and (now - cache_expiry.get(symbol, 0)) < 5:
-        return latest_data[symbol]
-    return force_fetch(symbol, update_prev=False)
+    with lock:
+        if symbol in latest_data and (now - cache_expiry.get(symbol, 0)) < 5:
+            return latest_data[symbol]
+    return force_fetch(symbol)
 
 @app.get("/quotes")
 def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
     symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
     for sym in symbols_req:
-        if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
-            resp[sym] = latest_data[sym]
-        else:
-            resp[sym] = force_fetch(sym, update_prev=False)
+        with lock:
+            if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
+                resp[sym] = latest_data[sym]
+            else:
+                resp[sym] = force_fetch(sym)
     return resp
 
 # ------------------ Startup ------------------
 @app.on_event("startup")
 def start_worker():
     initialize_prev_values()
-    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # 5 min interval
+    t = threading.Thread(target=track_all, args=(300,), daemon=True)
     t.start()
