@@ -2,9 +2,3 @@ fastapi
 uvicorn
 requests
 fyers-apiv3
-threading
-
-
-
-
-
