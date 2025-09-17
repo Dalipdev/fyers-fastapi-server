@@ -30,6 +30,8 @@ cache_expiry = {}
 prev_ltp = {}
 prev_volume = {}
 
+lock = threading.Lock()  # 🔒 lock for thread safety
+
 # ------------------ Stock List ------------------
 all_symbols = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ","NSE:BAJAJ-AUTO-EQ",
@@ -45,7 +47,7 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Fyers Token ------------------
+# ------------------ Token Refresh ------------------
 def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
@@ -64,6 +66,23 @@ def get_access_token():
         return res["access_token"]
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
+
+# ------------------ Initialize Prev Values ------------------
+def initialize_prev_values():
+    try:
+        ACCESS_TOKEN = get_access_token()
+        fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
+        res = fyers.quotes({"symbols": ",".join(all_symbols)})
+        if res.get("s") == "ok" and 'd' in res:
+            with lock:
+                for item in res['d']:
+                    sym = item['n'].replace("NSE:", "").replace("-EQ", "")
+                    data = item['v']
+                    prev_volume[sym] = data.get('volume', 0)
+                    prev_ltp[sym] = data.get('lp', 0) or data.get('ltp', 0)
+            print("✅ Initialized prev_volume & prev_ltp")
+    except Exception as e:
+        print("⚠️ Failed to initialize previous values:", e)
 
 # ------------------ Background Worker ------------------
 def track_all(interval=300):
@@ -86,42 +105,39 @@ def track_all(interval=300):
             if res and res.get("s") == "ok" and 'd' in res:
                 data_map = {item['n']: item['v'] for item in res['d']}
 
-                for sym in all_symbols:
-                    clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
-                    data = data_map.get(sym, {})
+                with lock:
+                    for sym in all_symbols:
+                        clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
+                        data = data_map.get(sym, {})
+                        ltp = data.get('lp', 0) or data.get('ltp', 0)
+                        volume = data.get('volume', 0)
 
-                    ltp = data.get('lp', 0) or data.get('ltp', 0)
-                    volume = data.get('volume', 0)
+                        prev_v = prev_volume.get(clean_symbol, volume)
+                        prev_p = prev_ltp.get(clean_symbol, ltp)
 
-                    prev_v = prev_volume.get(clean_symbol, volume)
-                    prev_p = prev_ltp.get(clean_symbol, ltp)
+                        delta_qty = max(volume - prev_v, 0)
 
-                    # Accurate quantity
-                    delta_qty = max(volume - prev_v, 0)
+                        buy_vol, sell_vol = 0, 0
+                        if delta_qty > 0:
+                            if ltp > prev_p:
+                                buy_vol = delta_qty
+                            elif ltp < prev_p:
+                                sell_vol = delta_qty
 
-                    # Approximate buy/sell based on price movement
-                    buy_vol, sell_vol = 0, 0
-                    if delta_qty > 0:
-                        if ltp > prev_p:
-                            buy_vol = delta_qty
-                        elif ltp < prev_p:
-                            sell_vol = delta_qty
+                        prev_volume[clean_symbol] = volume
+                        prev_ltp[clean_symbol] = ltp
 
-                    # Save previous values
-                    prev_volume[clean_symbol] = volume
-                    prev_ltp[clean_symbol] = ltp
-
-                    latest_data[clean_symbol] = {
-                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Symbol": clean_symbol,
-                        "CumulativeVolume": volume,
-                        "Quantity": delta_qty,
-                        "LTP": ltp,
-                        "BuyVolume": buy_vol,
-                        "SellVolume": sell_vol,
-                        "Mode": "live" if fyers else "offline"
-                    }
-                    cache_expiry[clean_symbol] = now_ts
+                        latest_data[clean_symbol] = {
+                            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "Symbol": clean_symbol,
+                            "CumulativeVolume": volume,
+                            "Quantity": delta_qty,
+                            "LTP": ltp,
+                            "BuyVolume": buy_vol,
+                            "SellVolume": sell_vol,
+                            "Mode": "live" if fyers else "offline"
+                        }
+                        cache_expiry[clean_symbol] = now_ts
 
                 print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
             else:
@@ -133,36 +149,37 @@ def track_all(interval=300):
         time.sleep(interval)
 
 # ------------------ Force Fetch ------------------
-def force_fetch(symbol: str):
+def force_fetch(symbol: str, update_prev=False):
     clean_symbol = symbol.upper()
     ACCESS_TOKEN = get_access_token()
     fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
     res = fyers.quotes({"symbols": f"NSE:{clean_symbol}-EQ"})
 
     now_ts = time.time()
-    ltp = 0
-    volume = 0
-    delta_qty = 0
-    buy_vol = 0
-    sell_vol = 0
+    ltp, volume = 0, 0
+    buy_vol = sell_vol = delta_qty = 0
 
     if res.get("s") == "ok" and "d" in res:
         data = res["d"][0]["v"]
         ltp = data.get("lp", 0) or data.get("ltp", 0)
         volume = data.get("volume", 0)
 
-        prev_v = prev_volume.get(clean_symbol, volume)
-        prev_p = prev_ltp.get(clean_symbol, ltp)
-        delta_qty = max(volume - prev_v, 0)
+        with lock:
+            prev_v = prev_volume.get(clean_symbol, volume)
+            prev_p = prev_ltp.get(clean_symbol, ltp)
 
+        delta_qty = max(volume - prev_v, 0)
         if delta_qty > 0:
             if ltp > prev_p:
                 buy_vol = delta_qty
             elif ltp < prev_p:
                 sell_vol = delta_qty
 
-        prev_volume[clean_symbol] = volume
-        prev_ltp[clean_symbol] = ltp
+        # only update if asked
+        if update_prev:
+            with lock:
+                prev_volume[clean_symbol] = volume
+                prev_ltp[clean_symbol] = ltp
 
     latest_data[clean_symbol] = {
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -187,22 +204,22 @@ def get_symbol(symbol: str):
     now = time.time()
     if symbol in latest_data and (now - cache_expiry.get(symbol, 0)) < 5:
         return latest_data[symbol]
-    return force_fetch(symbol)
+    return force_fetch(symbol, update_prev=False)
 
 @app.get("/quotes")
 def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
     symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
-
     for sym in symbols_req:
         if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
             resp[sym] = latest_data[sym]
         else:
-            resp[sym] = force_fetch(sym)
+            resp[sym] = force_fetch(sym, update_prev=False)
     return resp
 
-# ------------------ Start Worker ------------------
+# ------------------ Startup ------------------
 @app.on_event("startup")
 def start_worker():
-    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # fetch every 5 min
+    initialize_prev_values()
+    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # 5 min interval
     t.start()
