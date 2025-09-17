@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import threading
 import random
 import os
+import pytz   # ✅ added for timezone handling
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -46,8 +47,10 @@ all_symbols = [
 ]
 
 # ------------------ Trading Window Check ------------------
+IST = pytz.timezone("Asia/Kolkata")
+
 def is_market_open():
-    now = datetime.now()
+    now = datetime.now(IST)   # ✅ use IST
     return (
         now.weekday() < 5 and   # Mon–Fri
         (now.hour > 9 or (now.hour == 9 and now.minute >= 14)) and
@@ -87,7 +90,7 @@ def track_all(interval=300):
 
     while True:
         try:
-            now = datetime.now()
+            now = datetime.now(IST)  # ✅ IST here
 
             if is_market_open():
                 # Inside trading window
@@ -128,7 +131,7 @@ def track_all(interval=300):
                         prev_ltp[clean_symbol] = ltp
 
                         latest_data[clean_symbol] = {
-                            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),  # ✅ IST
                             "Symbol": clean_symbol,
                             "CumulativeVolume": volume,
                             "Quantity": delta,
@@ -139,7 +142,7 @@ def track_all(interval=300):
                         }
                         cache_expiry[clean_symbol] = now_ts
 
-                    print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
+                    print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now(IST).strftime('%H:%M:%S')}")
 
                 else:
                     print("⚠️ API unavailable, skipping cycle")
@@ -181,7 +184,7 @@ def force_fetch(symbol: str):
         mode = "dummy"
 
     latest_data[clean_symbol] = {
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),  # ✅ IST
         "Symbol": clean_symbol,
         "CumulativeVolume": volume,
         "Quantity": 0,
@@ -231,7 +234,3 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
-
-
-
-
