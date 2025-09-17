@@ -6,16 +6,16 @@ from datetime import datetime
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
-import random
-import os 
+import os
+import pytz  # timezone
 
-# ------------------ Environment Variables ------------------
+# ------------------ Environment Variables ----------------
 CLIENT_ID = os.getenv("CLIENT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
 REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
 PIN = os.getenv("PIN")
 
-# ------------------ FastAPI Setup ------------------
+# ------------------ FastAPI Setup ----------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -25,12 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------ Shared Data ------------------
+# ------------------ Shared Data ----------------
 latest_data = {}
 cache_expiry = {}
 active_symbols = set()
 
-# ------------------ Stock List ------------------
+# ------------------ Stock List ----------------
 all_symbols = [
     "NSE:ADANIENT-EQ","NSE:ADANIPORTS-EQ","NSE:APOLLOHOSP-EQ","NSE:ASIANPAINT-EQ","NSE:BAJAJ-AUTO-EQ",
     "NSE:BAJFINANCE-EQ","NSE:BAJAJFINSV-EQ","NSE:BEL-EQ","NSE:BHARTIARTL-EQ","NSE:CIPLA-EQ","NSE:COALINDIA-EQ",
@@ -45,7 +45,18 @@ all_symbols = [
     "NSE:PNB-EQ","NSE:CANBK-EQ","NSE:AUBANK-EQ"
 ]
 
-# ------------------ Token Refresh ------------------
+# ------------------ Timezone & Market Check ----------------
+IST = pytz.timezone("Asia/Kolkata")
+
+def is_market_open():
+    now = datetime.now(IST)
+    return (
+        now.weekday() < 5 and
+        (now.hour > 9 or (now.hour == 9 and now.minute >= 14)) and
+        (now.hour < 15 or (now.hour == 15 and now.minute <= 31))
+    )
+
+# ------------------ Token Refresh ----------------
 def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
@@ -65,35 +76,32 @@ def get_access_token():
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
 
-# ------------------ Optimized Background Worker ------------------
+# ------------------ Background Worker ----------------
 def track_all(interval=300):
     prev_volume, prev_ltp = {}, {}
-
-    # Add all symbols to active set once
-    for sym in all_symbols:
-        active_symbols.add(sym)
-
     ACCESS_TOKEN = None
     fyers = None
 
+    # Add all symbols to active set
+    for sym in all_symbols:
+        active_symbols.add(sym)
+
     while True:
         try:
-            # Initialize Fyers connection if not ready
+            if not is_market_open():
+                print("⏸ Market closed. Sleeping 5 min")
+                time.sleep(interval)
+                continue
+
             if not fyers:
-                try:
-                    ACCESS_TOKEN = get_access_token()
-                    fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
-                except Exception as e:
-                    print("⚠️ Token fetch failed, dummy mode:", e)
-                    fyers = None
+                ACCESS_TOKEN = get_access_token()
+                fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
 
-            # Fetch all symbols in one call
-            res = fyers.quotes({"symbols": ",".join(all_symbols)}) if fyers else None
-            now = time.time()
+            res = fyers.quotes({"symbols": ",".join(all_symbols)})
+            now_ts = time.time()
 
-            if res and res.get("s") == "ok" and 'd' in res:
-                data_map = {item['n']: item['v'] for item in res['d']}  # symbol → data map
-
+            if res.get("s") == "ok" and 'd' in res:
+                data_map = {item['n']: item['v'] for item in res['d']}
                 for sym in all_symbols:
                     clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
                     data = data_map.get(sym, {})
@@ -101,67 +109,47 @@ def track_all(interval=300):
                     ltp = data.get('lp', 0) or data.get('ltp', 0)
                     volume = data.get('volume', 0)
 
-                    # Fallback if live data missing
+                    # Skip if no live data
                     if not ltp or not volume:
-                        ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
-                        volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
+                        continue
 
-                    prev_vol = prev_volume.get(clean_symbol)
-                    delta = max(0, volume - prev_vol) if prev_vol is not None else 0
-                    prev_volume[clean_symbol] = volume
-
-                    prev_price = prev_ltp.get(clean_symbol)
+                    delta = max(0, volume - prev_volume.get(clean_symbol, 0))
                     buy_vol, sell_vol = 0, 0
-                    if delta > 0 and prev_price is not None:
+                    if delta > 0:
+                        prev_price = prev_ltp.get(clean_symbol, ltp)
                         if ltp > prev_price: buy_vol = delta
                         elif ltp < prev_price: sell_vol = delta
+
                     prev_ltp[clean_symbol] = ltp
+                    prev_volume[clean_symbol] = volume
 
                     latest_data[clean_symbol] = {
-                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
                         "Symbol": clean_symbol,
                         "CumulativeVolume": volume,
                         "Quantity": delta,
                         "LTP": ltp,
                         "BuyVolume": buy_vol,
                         "SellVolume": sell_vol,
-                        "Mode": "live" if fyers else "dummy"
+                        "Mode": "live"
                     }
-                    cache_expiry[clean_symbol] = now
+                    cache_expiry[clean_symbol] = now_ts
 
-                print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}")
-
+                print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now(IST).strftime('%H:%M:%S')}")
             else:
-                # Dummy update if API fails
-                for sym in all_symbols:
-                    clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
-                    ltp = prev_ltp.get(clean_symbol, random.randint(500, 1500))
-                    volume = prev_volume.get(clean_symbol, random.randint(10000, 50000))
-                    prev_ltp[clean_symbol] = ltp
-                    prev_volume[clean_symbol] = volume
-                    latest_data[clean_symbol] = {
-                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "Symbol": clean_symbol,
-                        "CumulativeVolume": volume,
-                        "Quantity": 0,
-                        "LTP": ltp,
-                        "BuyVolume": 0,
-                        "SellVolume": 0,
-                        "Mode": "dummy"
-                    }
-                    cache_expiry[clean_symbol] = now
+                print("⚠️ API returned error, skipping cycle")
 
         except Exception as e:
             print("⚠️ Exception inside loop:", e)
 
+        # Sleep exactly 5 minutes
         time.sleep(interval)
 
-# ------------------ Force Fetch ------------------
+# ------------------ Force Fetch ----------------
 def force_fetch(symbol: str):
     clean_symbol = symbol.upper()
     now = time.time()
     ltp, volume = None, None
-    mode = "live"
 
     try:
         sym_code = f"NSE:{clean_symbol}-EQ"
@@ -169,38 +157,33 @@ def force_fetch(symbol: str):
         fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
         res = fyers.quotes({"symbols": sym_code})
         if res.get("s") == "ok" and "d" in res:
-            item = res["d"][0]
-            data = item["v"]
-            ltp = data.get("lp", 0) or data.get("ltp", 0)
-            volume = data.get("volume", 0)
-    except Exception:
-        ltp, volume, mode = None, None, "dummy"
+            data = res['d'][0]['v']
+            ltp = data.get('lp', 0) or data.get('ltp', 0)
+            volume = data.get('volume', 0)
+    except Exception as e:
+        print(f"⚠️ Force fetch failed for {symbol}: {e}")
+        return None
 
     if not ltp or not volume:
-        ltp = random.randint(500, 1500)
-        volume = random.randint(10000, 50000)
-        mode = "dummy"
+        return None
 
     latest_data[clean_symbol] = {
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
         "Symbol": clean_symbol,
         "CumulativeVolume": volume,
         "Quantity": 0,
         "LTP": ltp,
         "BuyVolume": 0,
         "SellVolume": 0,
-        "Mode": mode
+        "Mode": "live"
     }
     cache_expiry[clean_symbol] = now
     return latest_data[clean_symbol]
 
-# ------------------ API Endpoints ------------------
+# ------------------ API Endpoints ----------------
 @app.get("/")
 def root():
-    return {
-        "status": "ok",
-        "message": "API is running. Try /quotes or /quotes/RELIANCE"
-    }
+    return {"status": "ok", "message": "API is running. Try /quotes or /quotes/RELIANCE"}
 
 @app.get("/quotes/{symbol}")
 def get_symbol(symbol: str):
@@ -213,16 +196,17 @@ def get_symbol(symbol: str):
 def get_multiple(symbol_list: str = ""):
     resp, now = {}, time.time()
     symbols_req = symbol_list.split(",") if symbol_list else [s.replace("NSE:", "").replace("-EQ", "") for s in all_symbols]
-
     for sym in symbols_req:
         if sym in latest_data and (now - cache_expiry.get(sym, 0)) < 5:
             resp[sym] = latest_data[sym]
         else:
-            resp[sym] = force_fetch(sym)
+            fetched = force_fetch(sym)
+            if fetched:
+                resp[sym] = fetched
     return resp
 
-# ------------------ Start Worker on Startup ------------------
+# ------------------ Start Worker on Startup ----------------
 @app.on_event("startup")
 def start_background_worker():
-    t = threading.Thread(target=track_all, daemon=True)
+    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # 5-minute interval
     t.start()
