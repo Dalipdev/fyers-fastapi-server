@@ -150,7 +150,7 @@ def track_all(interval=300):
             else:
                 # Outside allowed time → sleep longer
                 print(f"⏸ Paused at {now.strftime('%H:%M:%S')} (outside trading window)")
-                time.sleep(60)
+                time.sleep(300)
                 continue
 
         except Exception as e:
@@ -234,3 +234,4 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
+
