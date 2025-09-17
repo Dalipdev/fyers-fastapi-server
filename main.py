@@ -95,7 +95,7 @@ def get_access_token():
         raise Exception(f"❌ Token refresh failed: {res}")
 
 # ------------------ Background Worker ------------------
-def track_all(interval=2):
+def track_all(interval=300):
     try:
         ACCESS_TOKEN = get_access_token()
         fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=ACCESS_TOKEN)
@@ -199,3 +199,4 @@ def start_worker():
     t.start()
 
 start_worker()
+
