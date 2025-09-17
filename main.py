@@ -25,10 +25,10 @@ app.add_middleware(
 )
 
 # ------------------ Shared Data ------------------
-latest_data = {}
-prev_ltp = {}
-prev_volume = {}
-lock = threading.Lock()  # thread-safe
+latest_data = {}        # {symbol: {...}}
+prev_ltp = {}           # {symbol: last LTP}
+prev_volume = {}        # {symbol: last cumulative volume}
+lock = threading.Lock() # thread-safe
 
 # ------------------ Stock List ------------------
 all_symbols = [
@@ -50,6 +50,7 @@ def get_appid_hash(client_id, secret_key):
     return hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
 
 def get_access_token():
+    """Get Fyers access token with timeout & error handling"""
     try:
         url = "https://api-t1.fyers.in/api/v3/validate-refresh-token"
         payload = {
@@ -58,17 +59,19 @@ def get_access_token():
             "refresh_token": REFRESH_TOKEN,
             "pin": PIN
         }
-        res = requests.post(url, json=payload, headers={"Content-Type":"application/json"}, timeout=5).json()
-        if res.get("s") == "ok" and "access_token" in res:
-            return res["access_token"]
+        res = requests.post(url, json=payload, headers={"Content-Type":"application/json"}, timeout=5)
+        res_json = res.json()
+        if res_json.get("s") == "ok" and "access_token" in res_json:
+            return res_json["access_token"]
     except Exception as e:
         print("⚠️ Token refresh failed:", e)
     return None
 
-# ------------------ Initialize previous values ------------------
+# ------------------ Initialize previous LTP & Volume ------------------
 def initialize_prev_values():
     token = get_access_token()
     if not token:
+        print("⚠️ Cannot initialize, token missing")
         return
     try:
         fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=token)
@@ -82,9 +85,9 @@ def initialize_prev_values():
                     prev_ltp[sym] = data.get('lp', 0) or data.get('ltp', 0)
             print("✅ Initialized previous LTP & volume")
     except Exception as e:
-        print("⚠️ Failed to init previous values:", e)
+        print("⚠️ Failed to initialize previous values:", e)
 
-# ------------------ Background Thread ------------------
+# ------------------ Background Thread to Track All Symbols ------------------
 def track_all(interval=300):
     while True:
         token = get_access_token()
@@ -95,7 +98,6 @@ def track_all(interval=300):
         try:
             fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=token)
             res = fyers.quotes({"symbols": ",".join(all_symbols)})
-            now_ts = time.time()
             if res.get("s") == "ok" and 'd' in res:
                 with lock:
                     for item in res['d']:
@@ -108,16 +110,19 @@ def track_all(interval=300):
                         prev_v = prev_volume.get(sym, volume)
                         prev_p = prev_ltp.get(sym, ltp)
                         delta_qty = max(volume - prev_v, 0)
-                        buy_vol, sell_vol = 0,0
+
+                        buy_vol, sell_vol = 0, 0
                         if delta_qty > 0:
                             if ltp > prev_p:
                                 buy_vol = delta_qty
                             elif ltp < prev_p:
                                 sell_vol = delta_qty
 
+                        # Update prev values
                         prev_volume[sym] = volume
                         prev_ltp[sym] = ltp
 
+                        # Update latest data cache
                         latest_data[sym] = {
                             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "Symbol": sym,
@@ -167,5 +172,5 @@ def get_multiple(symbol_list: str = ""):
 @app.on_event("startup")
 def start_worker():
     initialize_prev_values()
-    t = threading.Thread(target=track_all, args=(300,), daemon=True)
+    t = threading.Thread(target=track_all, args=(60,), daemon=True)  # fetch every 1 min
     t.start()
