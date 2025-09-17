@@ -74,7 +74,7 @@ def get_access_token():
         raise Exception(f"❌ Token refresh failed: {res}")
 
 # ------------------ Optimized Background Worker ------------------
-def track_all(interval=2):
+def track_all(interval=300):
     prev_volume, prev_ltp = {}, {}
 
     # Add all symbols to active set once
@@ -230,5 +230,6 @@ def get_multiple(symbol_list: str = ""):
 def start_background_worker():
     t = threading.Thread(target=track_all, daemon=True)
     t.start()
+
 
 
