@@ -1,8 +1,9 @@
-fastapi==0.110.0
-uvicorn[standard]==0.27.0
+fastapi
+uvicorn
 requests
 fyers-apiv3
 threading
+
 
 
 
