@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import threading
 import random
 import os
-import pytz   # ✅ timezone handling
+import pytz
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -52,7 +52,7 @@ IST = pytz.timezone("Asia/Kolkata")
 def is_market_open():
     now = datetime.now(IST)
     return (
-        now.weekday() < 5 and   # Mon–Fri
+        now.weekday() < 5 and
         (now.hour > 9 or (now.hour == 9 and now.minute >= 14)) and
         (now.hour < 15 or (now.hour == 15 and now.minute <= 31))
     )
@@ -78,21 +78,17 @@ def get_access_token():
         raise Exception(f"❌ Token refresh failed: {res}")
 
 # ------------------ Background Worker ------------------
-def track_all(interval=300):  # 5 minutes default
+def track_all(interval=300):  # 5 minutes
     prev_volume, prev_ltp = {}, {}
-
-    # Add all symbols once
     for sym in all_symbols:
         active_symbols.add(sym)
 
     ACCESS_TOKEN, fyers = None, None
 
     while True:
-        try:
-            now = datetime.now(IST)
-
-            if is_market_open():
-                # Inside trading window
+        now = datetime.now(IST)
+        if is_market_open():
+            try:
                 if not fyers:
                     try:
                         ACCESS_TOKEN = get_access_token()
@@ -106,7 +102,6 @@ def track_all(interval=300):  # 5 minutes default
 
                 if res and res.get("s") == "ok" and 'd' in res:
                     data_map = {item['n']: item['v'] for item in res['d']}
-
                     for sym in all_symbols:
                         clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
                         data = data_map.get(sym, {})
@@ -142,17 +137,16 @@ def track_all(interval=300):  # 5 minutes default
                         cache_expiry[clean_symbol] = now_ts
 
                     print(f"✅ Updated {len(all_symbols)} symbols at {datetime.now(IST).strftime('%H:%M:%S')}")
-
                 else:
                     print("⚠️ API unavailable, skipping cycle")
 
-            else:
-                print(f"⏸ Paused at {now.strftime('%H:%M:%S')} (outside trading window)")
+            except Exception as e:
+                print("⚠️ Exception inside loop:", e)
 
-        except Exception as e:
-            print("⚠️ Exception inside loop:", e)
+        else:
+            print(f"⏸ Paused at {now.strftime('%H:%M:%S')} (outside trading window)")
 
-        time.sleep(interval)  # ✅ always wait same interval
+        time.sleep(interval)  # ✅ wait full interval between fetches
 
 # ------------------ Force Fetch ------------------
 def force_fetch(symbol: str):
@@ -225,8 +219,9 @@ def get_multiple(symbol_list: str = ""):
             resp[sym] = force_fetch(sym)
     return resp
 
-# ------------------ Start Worker on Startup ------------------
-@app.on_event("startup")
-def start_background_worker():
-    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # ✅ 5 min interval
+# ------------------ Start Worker ------------------
+if __name__ == "__main__":
+    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # 5 minutes
     t.start()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
