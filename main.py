@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import threading
 import random
 import os
-import pytz   # ✅ added for timezone handling
+import pytz   # ✅ timezone handling
 
 # ------------------ Environment Variables ------------------
 CLIENT_ID = os.getenv("CLIENT_ID")
@@ -50,7 +50,7 @@ all_symbols = [
 IST = pytz.timezone("Asia/Kolkata")
 
 def is_market_open():
-    now = datetime.now(IST)   # ✅ use IST
+    now = datetime.now(IST)
     return (
         now.weekday() < 5 and   # Mon–Fri
         (now.hour > 9 or (now.hour == 9 and now.minute >= 14)) and
@@ -77,20 +77,19 @@ def get_access_token():
     else:
         raise Exception(f"❌ Token refresh failed: {res}")
 
-# ------------------ Optimized Background Worker ------------------
-def track_all(interval=300):
+# ------------------ Background Worker ------------------
+def track_all(interval=300):  # 5 minutes default
     prev_volume, prev_ltp = {}, {}
 
-    # Add all symbols to active set once
+    # Add all symbols once
     for sym in all_symbols:
         active_symbols.add(sym)
 
-    ACCESS_TOKEN = None
-    fyers = None
+    ACCESS_TOKEN, fyers = None, None
 
     while True:
         try:
-            now = datetime.now(IST)  # ✅ IST here
+            now = datetime.now(IST)
 
             if is_market_open():
                 # Inside trading window
@@ -106,7 +105,7 @@ def track_all(interval=300):
                 now_ts = time.time()
 
                 if res and res.get("s") == "ok" and 'd' in res:
-                    data_map = {item['n']: item['v'] for item in res['d']}  # symbol → data map
+                    data_map = {item['n']: item['v'] for item in res['d']}
 
                     for sym in all_symbols:
                         clean_symbol = sym.replace("NSE:", "").replace("-EQ", "")
@@ -131,7 +130,7 @@ def track_all(interval=300):
                         prev_ltp[clean_symbol] = ltp
 
                         latest_data[clean_symbol] = {
-                            "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),  # ✅ IST
+                            "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
                             "Symbol": clean_symbol,
                             "CumulativeVolume": volume,
                             "Quantity": delta,
@@ -148,15 +147,12 @@ def track_all(interval=300):
                     print("⚠️ API unavailable, skipping cycle")
 
             else:
-                # Outside allowed time → sleep longer
                 print(f"⏸ Paused at {now.strftime('%H:%M:%S')} (outside trading window)")
-                time.sleep(300)
-                continue
 
         except Exception as e:
             print("⚠️ Exception inside loop:", e)
 
-        time.sleep(interval)
+        time.sleep(interval)  # ✅ always wait same interval
 
 # ------------------ Force Fetch ------------------
 def force_fetch(symbol: str):
@@ -184,7 +180,7 @@ def force_fetch(symbol: str):
         mode = "dummy"
 
     latest_data[clean_symbol] = {
-        "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),  # ✅ IST
+        "Timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
         "Symbol": clean_symbol,
         "CumulativeVolume": volume,
         "Quantity": 0,
@@ -232,6 +228,5 @@ def get_multiple(symbol_list: str = ""):
 # ------------------ Start Worker on Startup ------------------
 @app.on_event("startup")
 def start_background_worker():
-    t = threading.Thread(target=track_all, daemon=True)
+    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # ✅ 5 min interval
     t.start()
-
