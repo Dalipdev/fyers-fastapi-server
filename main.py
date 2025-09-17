@@ -108,7 +108,7 @@ def track_all(interval=300):
 
             try:
                 if not active_symbols:
-                    time.sleep(1)
+                    time.sleep(300)
                     continue
 
                 res = fyers.quotes({"symbols": ",".join(active_symbols)})
@@ -199,4 +199,5 @@ def start_worker():
     t.start()
 
 start_worker()
+
 
