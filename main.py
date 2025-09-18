@@ -76,20 +76,21 @@ def initialize_prev_values():
     try:
         fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=token)
         res = fyers.quotes({"symbols": ",".join(all_symbols)})
-        if res.get("s") == "ok" and "d" in res:
+        if res.get("s") == "ok" and 'd' in res:
             with lock:
-                for item in res["d"]:
-                    sym = item["n"].replace("NSE:", "").replace("-EQ", "")
-                    data = item["v"]
-                    prev_volume[sym] = data.get("volume", 0)
-                    prev_ltp[sym] = data.get("lp", 0) or data.get("ltp", 0)
+                for item in res['d']:
+                    sym = item['n'].replace("NSE:", "").replace("-EQ", "")
+                    data = item['v']
+                    prev_volume[sym] = data.get('volume', 0)
+                    prev_ltp[sym] = data.get('lp', 0) or data.get('ltp', 0)
             print("✅ Initialized previous LTP & volume")
     except Exception as e:
         print("⚠️ Failed to initialize previous values:", e)
 
 # ------------------ Background Thread to Track All Symbols ------------------
-def track_all(interval=300):
-    """Continuously fetch quotes for all symbols and update latest_data"""
+def track_all(interval=180):
+    """Background tracker that fetches quotes every `interval` seconds,
+    calculates volume deltas, and updates latest_data without losing trades."""
     while True:
         token = get_access_token()
         if not token:
@@ -100,47 +101,41 @@ def track_all(interval=300):
         try:
             fyers = fyersModel.FyersModel(client_id=CLIENT_ID, token=token)
             res = fyers.quotes({"symbols": ",".join(all_symbols)})
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            if res.get("s") == "ok" and "d" in res:
+            if res.get("s") == "ok" and 'd' in res:
                 with lock:
-                    for item in res["d"]:
-                        sym_full = item["n"]              # e.g. NSE:ADANIPORTS-EQ
+                    for item in res['d']:
+                        sym_full = item['n']
                         sym = sym_full.replace("NSE:", "").replace("-EQ", "")
-                        data = item["v"]
+                        data = item['v']
 
-                        # Extract LTP & cumulative volume
-                        ltp = data.get("lp", 0) or data.get("ltp", 0)
-                        volume = data.get("volume", 0)
+                        ltp = data.get('lp', 0) or data.get('ltp', 0)
+                        volume = data.get('volume', 0)
 
-                        # Previous values
-                        prev_v = prev_volume.get(sym)
-                        prev_p = prev_ltp.get(sym)
+                        # Previous state
+                        prev_v = prev_volume.get(sym, volume)
+                        prev_p = prev_ltp.get(sym, ltp)
 
-                        # --- Delta calculation ---
-                        if prev_v is None:
-                            delta_qty = 0   # first tick, no delta
-                        else:
-                            delta_qty = volume - prev_v
-                            if delta_qty < 0:
-                                # Reset case (new session / reconnect)
-                                delta_qty = volume
+                        # Delta calculation
+                        delta_qty = volume - prev_v
+                        if delta_qty < 0:
+                            # New session/day reset
+                            delta_qty = volume
 
-                        # --- Buy/Sell classification ---
                         buy_vol, sell_vol = 0, 0
-                        if delta_qty > 0 and prev_p is not None:
+                        if delta_qty > 0:
                             if ltp > prev_p:
                                 buy_vol = delta_qty
                             elif ltp < prev_p:
                                 sell_vol = delta_qty
-                            # if ltp == prev_p → treat as neutral
+                            else:
+                                # Flat price movement → ambiguous
+                                pass
 
-                        # --- Save updated prev values ---
-                        prev_volume[sym] = volume
-                        prev_ltp[sym] = ltp
-
-                        # --- Store latest snapshot ---
+                        # Update latest snapshot
                         latest_data[sym] = {
-                            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "Timestamp": now,
                             "Symbol": sym,
                             "CumulativeVolume": volume,
                             "Quantity": delta_qty,
@@ -150,10 +145,13 @@ def track_all(interval=300):
                             "Mode": "live"
                         }
 
-                        # --- Debug logging ---
-                        print(f"[{sym}] Vol(prev={prev_v}, curr={volume}, Δ={delta_qty}) "
-                              f"LTP(prev={prev_p}, curr={ltp}) "
-                              f"Buy={buy_vol}, Sell={sell_vol}")
+                        # ✅ Update prev values only AFTER processing
+                        prev_volume[sym] = volume
+                        prev_ltp[sym] = ltp
+
+                        # Logging for debugging
+                        print(f"⏰ {now} | {sym} | CumVol={volume}, Δ={delta_qty}, "
+                              f"Buy={buy_vol}, Sell={sell_vol}, LTP={ltp}")
 
         except Exception as e:
             print("⚠️ Exception in track_all:", e)
@@ -194,5 +192,5 @@ def get_multiple(symbol_list: str = ""):
 @app.on_event("startup")
 def start_worker():
     initialize_prev_values()
-    t = threading.Thread(target=track_all, args=(300,), daemon=True)  # fetch every 5 min
+    t = threading.Thread(target=track_all, args=(180,), daemon=True)  # fetch every 3 min
     t.start()
